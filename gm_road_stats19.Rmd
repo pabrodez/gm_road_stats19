@@ -1,0 +1,182 @@
+---
+title: "GM road accident data"
+author: "Pablo M. Rodriguez"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: united
+    css: style.css
+    toc: true
+    toc_float: true
+    highlight: tango
+    df_print: paged
+    code_folding: "hide" 
+---
+
+```{r chunk_setup, include=FALSE}
+knitr::opts_chunk$set(
+  cache=TRUE, echo=TRUE, message=FALSE, tidy=FALSE, warning=FALSE, error=FALSE, dpi=300, out.width = "100%", out.height = "100%"
+)
+```
+
+***
+
+> This Rmarkdown reads, transforms and visualize the [Accidents STATS19 data set for Greater Manchester](https://data.gov.uk/dataset/25170a92-0736-4090-baea-bf6add82d118/gm-road-casualty-accidents-full-stats19-data)
+Detailled description of how the data is collected and coded can be found [here](https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/170572/dft-statement-stats-19.pdf)
+Contains OS data © Crown copyright and database rights 2019
+
+***
+
+# Load libraries and get data
+```{r libraries}
+library(tidyverse)
+library(scales)
+library(lubridate)
+library(data.table)
+library(devtools)
+library(sf)
+library(patchwork)
+```
+
+```{r get_data}
+if (!dir.exists("./data")) {
+  dir.create("./data")
+  
+  urls <-
+    list(vehicles = "http://odata.tfgm.com/opendata/downloads/STATS19VehData20052018.csv",
+         accidents = "http://odata.tfgm.com/opendata/downloads/STATS19AccData20052018.csv",
+         casualties = "http://odata.tfgm.com/opendata/downloads/STATS19CasData20052018.csv")
+  
+  iwalk(urls, ~ download.file(.x, destfile = str_c("./data/", .y, ".csv")))
+  
+  list_df <-
+    map(list.files("./data", pattern = "\\.csv", full.names = TRUE), ~ fread(., colClasses = "character", check.names = TRUE))
+  
+} else {
+  list_df <-
+    map(list.files("./data", pattern = "\\.csv", full.names = TRUE), ~ fread(., colClasses = "character", check.names = TRUE))
+}
+
+```
+
+Add new columns and transform when necesasry:
+```{r new_cols}
+list_df[[1]][, date_time:=as.POSIXct(paste(OutputDate, OutputTime), format = "%d/%m/%Y %R")]
+list_df[[1]][, Day:=wday(as.numeric(Day), label = TRUE)]
+list_df[[1]][, NumberCasualties:=as.numeric(NumberCasualties)]
+```
+
+Join data frames:
+```{r join}
+merged_df <- Reduce(function(x, y) x[y, on="Accident.Index", nomatch=0], list_df)
+```
+
+<br>
+
+***
+
+<br>
+
+# Plot
+
+Number of recorded accidents per year:
+```{r acc_year}
+list_df[[1]][, .(accidents = .N), by = Year] %>% 
+  ggplot(aes(x = Year, y = accidents, group = 1)) +
+  geom_line()
+```
+
+Number of casualties per year:
+```{r cas_year}
+list_df[[1]][, .(casualties = sum(NumberCasualties)), by = Year] %>% 
+  ggplot(aes(x = Year, y = casualties, group = 1)) +
+  geom_line() 
+```
+
+If we index casualties using 2005 as base:
+```{r cas_year_ind}
+list_df[[1]][, .(casualties = sum(NumberCasualties)), by = Year] %>% 
+  mutate(casualties = casualties/pull(filter(., Year == min(Year)), "casualties")) %>% 
+  ggplot(aes(x = Year, y = casualties, group = 1)) +
+  geom_line() 
+```
+
+At first glance, it seems there's been a large drop in the number of accidents and, therefore, casualties. Let's take a look at the casualties/accident ratio:
+
+```{r cas_per_acc}
+(list_df[[1]][, .(ratio = sum(NumberCasualties) / .N), by = Year] %>% 
+  ggplot(aes(x = Year, y = ratio, group = 1)) +
+  geom_line()) /
+(list_df[[1]][, .(casualties = sum(NumberCasualties)), by = Year] %>% 
+  ggplot(aes(x = Year, y = casualties, group = 1)) +
+  geom_line())
+```
+
+The casualties/accident ratio doesn't seem to follow the same trend as the evolution of raw number of casualties or accidents per year. But there's a steep drop from 2015 that keeps low even during the small rise between 2016 and 2018.
+
+Now, let's see the type of casualties changed over the years: 
+```{r cas_type}
+list_df[[2]][, CasualtyClass := c("1" = "driver/rider", "2" = "veh./pillion passenger", "3" = "pedestrian")[CasualtyClass]][, .N, by = c("Year", "CasualtyClass")] %>% 
+  ggplot(aes(x = Year, y = N, group = CasualtyClass, fill = CasualtyClass)) +
+  geom_area() +
+  theme(legend.position = "bottom")
+  
+```
+It seems that since 2016, throughout the small rise of casualties, the share of victims who were drivers/ riders also became higher.
+
+```{r cas_type_share}
+list_df[[2]][, .(sum_class = .N), by = c("Year", "CasualtyClass")][
+  list_df[[2]][, .(sum_year=.N), by="Year"], on = "Year"][
+    , prop := sum_class / sum_year] %>%
+  # list_df[[2]][, .(sum_class = .N), by = c("Year", "CasualtyClass")] %>%
+  ggplot(aes(x = Year, y = sum_class, fill = CasualtyClass)) +
+  geom_col(position = position_fill(reverse = TRUE)) +
+  geom_text(aes(label = scales::percent(prop)), position = position_fill(reverse = TRUE, vjust = .5)) +
+  theme(legend.position = "bottom")
+```
+If we see the exact porportions, it seems that the share of drivers/riders has remained constant with slight upward trend since 2013 for drivers. 2016 was the year with most proportion of pedestrian casualties with 21.1%, while for drivers it was 2017 with 58.8%. However, the percentage of pedestrians has steadily lowered since 2011, with its best year in 2016 (23.1%) and its worst in 2006/2009.
+
+> We can see that the small rise in casualties (and accidents) from 2016 to 2018 came with a increase in the proportion of drivers/ riders among them and a reduction for pedestrians.
+
+Let's see if this small spike within a larger downward trend in road casualties has come with a change in the severity:
+
+```{r cas_sev}
+list_df[[2]][, CasualtySeverity := c("1" = "Fatal", "2" = "Serious", "3" = "Slight")[CasualtySeverity], ]
+
+(list_df[[2]][, .N, by = c("Year", "CasualtySeverity")] %>% 
+  ggplot(aes(x = Year, y = N, group = CasualtySeverity, color = CasualtySeverity)) +
+  geom_line()) /
+(list_df[[2]][, .(sum_sev = .N), by = c("Year", "CasualtySeverity")][
+  list_df[[2]][, .(sum_year=.N), by="Year"], on = "Year"][
+    , prop := sum_sev / sum_year] %>% 
+   ggplot(aes(x = Year, y = sum_sev, fill = CasualtySeverity)) +
+   geom_col(position = position_fill(vjust =  .5)) +
+   geom_text(aes(label = scales::percent(prop)), position = position_fill(vjust =  c(.7)))) 
+```
+Since 2005 the share of serious casualties has increased, the slight ones lowered and fatal ones have stayed between 0.6% and 1.4%. In the peak from 2016 slight casualties increased slightly breaking its downward trend.
+
+Transform to sf object and change the coordinate system from Ordenance Survey/BNG (27700) to WGS84 (4326)
+```{r change_crs}
+list_df[[1]] <- 
+  list_df[[1]] %>%
+    st_as_sf(coords = c("Easting", "Northing"), crs = 27700) %>%
+    st_transform(4326)
+```
+
+Get wards boundaries of Greater Manchester
+```{r boundaries, results='hide'}
+if (!file.exists("/data/boundaries.geojson")) {
+  download.file("https://opendata.arcgis.com/datasets/a0b43fe01c474eb9a18b6c90f91664c2_2.geojson", destfile = "./data/boundaries.geojson")
+  sf_wards <- st_read("./data/boundaries.geojson", crs = 4326, stringsAsFactors = FALSE)
+  
+} else {
+  sf_wards <- st_read("./data/boundaries.geojson", crs = 4326, stringsAsFactors = FALSE)
+}
+sf_gm <- modify_if(sf_gb, is.character, ~ tolower(.))
+```
+
+
+```{r session_info, results='markup'}
+devtools::session_info()
+```
+
